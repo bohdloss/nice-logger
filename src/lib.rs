@@ -1,7 +1,7 @@
 use ansi_term::{ANSIDisplay, Color, Style};
-use chrono::{Utc};
+use chrono::{DateTime, Utc};
 use lazy_static::lazy_static;
-use log::{LevelFilter, Metadata, Record, SetLoggerError};
+
 use parse_display::Display;
 use rand::RngCore;
 use core::error::Error;
@@ -13,6 +13,8 @@ use std::time::SystemTime;
 use std::{fmt, fs, io, thread};
 use std::mem::replace;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::thread::Thread;
+use stack_buf_io::StackBufWriter;
 
 lazy_static::lazy_static!{
 	static ref ANSI_SUPPORT_ENABLED: bool = {
@@ -95,7 +97,10 @@ pub fn always_global(func: &mut dyn FnMut(&Logger)) {
 	func(&GLOBAL_LOGGER);
 }
 
-pub fn initialize() -> Result<(), SetLoggerError> {
+#[cfg(feature = "log")]
+pub fn initialize() -> Result<(), log::SetLoggerError> {
+	use log::{LevelFilter, Metadata, Record};
+
 	struct DynLogger;
 	impl log::Log for DynLogger {
 		#[inline]
@@ -118,6 +123,7 @@ pub fn initialize() -> Result<(), SetLoggerError> {
 	Ok(())
 }
 
+#[cfg(feature = "log")]
 fn level_to_severity(level: log::Level) -> Severity {
 	use log::Level;
 	match level {
@@ -129,7 +135,9 @@ fn level_to_severity(level: log::Level) -> Severity {
 	}
 }
 
-static MAX_RECURSION_DEPTH: usize = 256;
+const MAX_RECURSION_DEPTH: usize = 256;
+const STACK_BUF_SIZE: usize = 512; // This way most log messages will be printed in a single write call
+const NEWLINE_MARKER: &str = "\n>";
 
 #[macro_export]
 macro_rules! log {
@@ -321,6 +329,10 @@ impl<T: Write> Write for NewlineReplacer<'_, T> {
 	fn flush(&mut self) -> io::Result<()> {
 		self.0.flush()
 	}
+
+	fn write_all(&mut self, buf: &[u8]) -> io::Result<()> {
+		self.write(buf).map(|_| ())
+	}
 }
 
 #[derive(Copy, Clone)]
@@ -338,6 +350,26 @@ pub struct Message<'a> {
 pub enum Target {
 	Stdout,
 	File
+}
+
+struct PrefixTempData {
+	show_thread: bool,
+	show_module: bool,
+	thread: Thread,
+	date: DateTime<Utc>,
+	time: SystemTime,
+}
+
+impl PrefixTempData {
+	fn new(logger: &Logger) -> Self {
+		Self {
+			show_thread: logger.show_thread.load(Ordering::Acquire),
+			show_module: logger.show_module.load(Ordering::Relaxed),
+			thread: thread::current(),
+			date: Utc::now(),
+			time: SystemTime::now(),
+		}
+	}
 }
 
 /// Represents the severity of a logger message,
@@ -409,7 +441,7 @@ impl PrefixData {
 	}
 
 	#[inline]
-	pub fn styled(&self) -> ANSIDisplay<'_, Self> {
+	fn styled(&self) -> ANSIDisplay<'_, Self> {
 		self.style().paint(self)
 	}
 }
@@ -478,10 +510,9 @@ impl Logger {
 		}
 	}
 
-	/// Logs a message with the specified severity
+	/// Logs a message.
 	///
 	/// # Arguments
-	/// * `severity` - The severity of the message
 	/// * `message` - The message to print
 	#[inline]
 	pub fn log(&self, message: Message) {
@@ -568,9 +599,9 @@ impl Logger {
 
 	fn write_std(&self, message: Message) {
 		if message.severity >= Severity::Error {
-			let _ = self.do_write(&mut io::stderr(), message, ansi_support_enabled());
+			let _ = self.do_write(&mut StackBufWriter::<_, STACK_BUF_SIZE>::new(io::stderr().lock()), message, ansi_support_enabled());
 		} else {
-			let _ = self.do_write(&mut io::stdout(), message, ansi_support_enabled());
+			let _ = self.do_write(&mut StackBufWriter::<_, STACK_BUF_SIZE>::new(io::stdout().lock()), message, ansi_support_enabled());
 		}
 	}
 
@@ -598,9 +629,9 @@ impl Logger {
 		let mut depth = 0;
 		for prefix in self.prefix.iter() {
 			if pretty {
-				write!(device, " -> {}", prefix.styled())?;
+				write!(NewlineReplacer(&mut *device, ""), " -> {}", prefix.styled())?;
 			} else {
-				write!(device, "[{}]", prefix)?;
+				write!(NewlineReplacer(&mut *device, ""), "[{}]", prefix)?;
 			}
 
 			// Failsafe for too many nested loggers
@@ -617,42 +648,36 @@ impl Logger {
 		Ok(())
 	}
 
-	fn write_complete_prefix<T: Write>(&self, device: &mut T, message: Message, pretty: bool) -> io::Result<()> {
-		// Retrieve some data
-		let show_thread = self.show_thread.load(Ordering::Acquire);
-		let show_module = self.show_module.load(Ordering::Acquire);
-		let thread = thread::current();
-		let thread_name = thread.name().unwrap_or("*unnamed_thread*");
-		let date = Utc::now();
-		let time = SystemTime::now();
+	fn write_complete_prefix<T: Write>(&self, device: &mut T, message: Message, pretty: bool, temp: &PrefixTempData) -> io::Result<()> {
+		let thread_name = temp.thread.name().unwrap_or("*unnamed_thread*");
 
 		if pretty {
 			write!(device, "{}.{:03}",
-			    date.format("%H:%M::%S"),
-				date.timestamp_subsec_millis()
+				   temp.date.format("%H:%M::%S"),
+				   temp.date.timestamp_subsec_millis()
 			)?;
 		} else {
 			write!(
 				device,
 				"[{}]",
-				humantime::format_rfc3339_millis(time)
+				humantime::format_rfc3339_millis(temp.time)
 			)?;
 		}
 
 		self.write_prefix(device, pretty)?;
 
 		if pretty {
-			if show_thread {
-				write!(device, " -> thread `{}`",
+			if temp.show_thread {
+				write!(NewlineReplacer(&mut *device, ""), " -> thread `{}`",
 					   thread_name,
 				)?;
 			}
 
-			if show_module && let Some(module) = message.module {
+			if temp.show_module && let Some(module) = message.module {
 				let mut style = Style::new();
 				style.background = Some(Color::White);
 				style.foreground = Some(Color::Black);
-				write!(device, " at {}", style.paint(module))?;
+				write!(NewlineReplacer(&mut *device, ""), " at {}", style.paint(module))?;
 
 				if let Some(line) = message.line {
 					let mut style = Style::new();
@@ -664,11 +689,11 @@ impl Logger {
 
 			write!(device, " -> {}", message.severity.styled())?;
 		} else {
-			if show_thread {
-				write!(device, "[{}]", thread_name)?;
+			if temp.show_thread {
+				write!(NewlineReplacer(&mut *device, ""), "[{}]", thread_name)?;
 			}
-			if show_module && let Some(module) = message.module {
-				write!(device, "[at {module}")?;
+			if temp.show_module && let Some(module) = message.module {
+				write!(NewlineReplacer(&mut *device, ""), "[at {module}")?;
 
 				if let Some(line) = message.line {
 					write!(device, ":{line}")?;
@@ -682,26 +707,28 @@ impl Logger {
 	}
 
 	fn do_write<T: Write>(&self, device: &mut T, message: Message, pretty: bool) -> io::Result<()> {
+		let temp = PrefixTempData::new(self);
 		if pretty {
 			write!(device, "{}", Color::White.normal().paint(""))?; // Reset color
 		}
-		self.write_complete_prefix(device, message, pretty)?;
+		self.write_complete_prefix(device, message, pretty, &temp)?;
 
-		NewlineReplacer(&mut *device, "\n>").write_fmt(message.message)?;
+		NewlineReplacer(&mut *device, NEWLINE_MARKER).write_fmt(message.message)?;
 
 		writeln!(device)?;
 
 		// Write errors
 		if let Some(error) = message.error {
-			self.write_complete_prefix(device, message, pretty)?;
+			self.write_complete_prefix(device, message, pretty, &temp)?;
 			if pretty {
-				writeln!(device, "{}: {}",
+				write!(NewlineReplacer(&mut *device, NEWLINE_MARKER), "{}: {}",
 				         Color::Red.paint("Error"),
 				         error
 				)?;
 			} else {
-				writeln!(device, "Error: {}", error)?;
+				write!(NewlineReplacer(&mut *device, NEWLINE_MARKER), "Error: {}", error)?;
 			}
+			writeln!(device)?;
 
 			let mut source_option = error.source();
 			let mut depth: usize = 0;
@@ -711,15 +738,16 @@ impl Logger {
 					break;
 				}
 
-				self.write_complete_prefix(device, message, pretty)?;
+				self.write_complete_prefix(device, message, pretty, &temp)?;
 				if pretty {
-					writeln!(device, "{}: {}",
+					write!(NewlineReplacer(&mut *device, NEWLINE_MARKER), "{}: {}",
 					         Color::Yellow.paint("Caused by"),
 					         source
 					)?;
 				} else {
-					writeln!(device, "Caused by: {}", source)?;
+					write!(NewlineReplacer(&mut *device, NEWLINE_MARKER), "Caused by: {}", source)?;
 				}
+				writeln!(device)?;
 				source_option = source.source();
 
 				depth += 1;
@@ -879,6 +907,7 @@ impl Drop for Logger {
 	}
 }
 
+#[cfg(feature = "log")]
 impl log::Log for Logger {
 	#[inline]
 	fn enabled(&self, metadata: &log::Metadata) -> bool {

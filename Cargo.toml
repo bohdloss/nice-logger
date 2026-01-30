@@ -10,8 +10,9 @@ lazy_static = "1.4.0"
 parse-display = "0.10.0"
 rand = "0.9.2"
 humantime = "2.3.0"
-log = "0.4.29"
+log = { version = "0.4.29", optional = true }
 shutdown_hooks = "0.1.0"
+stack-buf-io = { git = "https://github.com/bohdloss/stack-buf-io" }
 
 [dev-dependencies]
 thiserror = "2.0.17"

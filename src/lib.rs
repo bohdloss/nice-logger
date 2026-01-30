@@ -818,7 +818,7 @@ impl Logger {
 	/// registered as a log file for some reason)
 	#[inline]
 	pub fn flush(&self) {
-		if let Ok(data) = self.shared.lock() &&
+		if let Ok(mut data) = self.shared.lock() &&
 			let Some(ref mut file) = data.log_file {
 			match file.flush() {
 				Err(error) => {

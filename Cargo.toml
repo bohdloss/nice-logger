@@ -1,0 +1,17 @@
+[package]
+name = "nice-logger"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+ansi_term = { git = "https://github.com/bohdloss/rust-ansi-term" }
+chrono = "0.4.33"
+lazy_static = "1.4.0"
+parse-display = "0.10.0"
+rand = "0.9.2"
+humantime = "2.3.0"
+log = "0.4.29"
+shutdown_hooks = "0.1.0"
+
+[dev-dependencies]
+thiserror = "2.0.17"

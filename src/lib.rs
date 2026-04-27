@@ -653,7 +653,7 @@ impl Logger {
 
 		if pretty {
 			write!(device, "{}.{:03}",
-				   temp.date.format("%H:%M::%S"),
+				   temp.date.format("%H:%M:%S"),
 				   temp.date.timestamp_subsec_millis()
 			)?;
 		} else {

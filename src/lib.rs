@@ -588,7 +588,7 @@ impl Logger {
 		match log_file_result {
 			Ok(file) => {
 				// Update the log file
-				data.log_file = Some(Box::new(BufWriter::new(file)));
+				data.log_file = Some(Box::new(file));
 			}
 			Err(error) => {
 				data.log_file = None;

@@ -812,8 +812,9 @@ impl Logger {
 
 	/// Changes the directory where the logger will attempt to create log files.
 	///
-	/// If a call to [`Logger::set_log_output`] has already been made, this has no effect as file
-	/// creation will have been inhibited.
+	/// If a call to [`Logger::set_log_output`] has already been made with a value other than
+	/// `None`, this has no effect as file creation will have been inhibited.
+	/// On the other hand, if the output device is `None`, this will un-inhibit file creation again.
 	///
 	/// Calling this with `None` means the default directory will be used (`./logs/`)
 	///
@@ -823,6 +824,9 @@ impl Logger {
 	pub fn set_log_dir(&self, dir: Option<PathBuf>) {
 		let mut data = self.shared.lock().unwrap();
 		data.log_dir = dir;
+		if data.log_file.is_none() {
+			data.attempt_creation = true;
+		}
 	}
 
 	/// Checks if a message would be logged to the console or to a file

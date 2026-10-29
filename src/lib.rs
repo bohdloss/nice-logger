@@ -12,6 +12,7 @@ use std::sync::{Arc, Mutex, RwLock};
 use std::time::SystemTime;
 use std::{fmt, fs, io, thread};
 use std::mem::replace;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::Thread;
 use stack_buf_io::StackBufWriter;
@@ -416,6 +417,7 @@ impl Severity {
 
 struct SharedLoggerData {
 	attempt_creation: bool,
+	log_dir: Option<PathBuf>,
 	log_file: Option<Box<dyn Write + Send>>,
 }
 
@@ -423,6 +425,7 @@ impl SharedLoggerData {
 	fn new() -> Self {
 		Self {
 			attempt_creation: true,
+			log_dir: None,
 			log_file: None,
 		}
 	}
@@ -562,7 +565,8 @@ impl Logger {
 
 	fn create_log_file(&self, data: &mut SharedLoggerData) {
 		// Try to create a logs folder
-		match fs::create_dir_all("logs") {
+		let log_dir = data.log_dir.clone().unwrap_or(PathBuf::from("logs"));
+		match fs::create_dir_all(&log_dir) {
 			Ok(_) => {}
 			Err(error) => {
 				safe_eprintln!("Error while creating folder structure for log files: {}", Self::gen_error_str(&error));
@@ -572,17 +576,17 @@ impl Logger {
 		let date = Utc::now();
 
 		// Base file name
-		let name = format!("logs/{}.log", date.format("%d_%m_%Y_%H_%M"));
+		let name = format!("{}.log", date.format("%d_%m_%Y_%H_%M"));
 		let mut name2: String;
-		let mut log_file_result = File::create_new(&name);
+		let mut log_file_result = File::create_new(log_dir.join(&name));
 
 		// Keep trying increasing log file indexes until we find a free file name
 		let mut number: usize = 0;
 		while let Err(err) = &log_file_result && let ErrorKind::AlreadyExists = err.kind() {
 			number += 1;
-			name2 = format!("logs/{}_{}.log", date.format("%d_%m_%Y_%H_%M"), number);
+			name2 = format!("{}_{}.log", date.format("%d_%m_%Y_%H_%M"), number);
 
-			log_file_result = File::create_new(&name2);
+			log_file_result = File::create_new(log_dir.join(&name2));
 		}
 
 		match log_file_result {
@@ -798,12 +802,27 @@ impl Logger {
 	/// log file from being created.
 	///
 	/// # Arguments
-	/// * `file` - The new file (or no file)
+	/// * `device` - The new file (or no file)
 	#[inline]
 	pub fn set_log_output(&self, device: Option<Box<dyn Write + Send>>) {
 		let mut data = self.shared.lock().unwrap();
 		data.log_file = device;
 		data.attempt_creation = false;
+	}
+
+	/// Changes the directory where the logger will attempt to create log files.
+	///
+	/// If a call to [`Logger::set_log_output`] has already been made, this has no effect as file
+	/// creation will have been inhibited.
+	///
+	/// Calling this with `None` means the default directory will be used (`./logs/`)
+	///
+	/// # Arguments
+	/// * `dir` - The new directory for log file creation
+	#[inline]
+	pub fn set_log_dir(&self, dir: Option<PathBuf>) {
+		let mut data = self.shared.lock().unwrap();
+		data.log_dir = dir;
 	}
 
 	/// Checks if a message would be logged to the console or to a file

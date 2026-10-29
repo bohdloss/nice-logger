@@ -7,7 +7,7 @@ use rand::RngCore;
 use core::error::Error;
 use std::fmt::{Debug, Formatter};
 use std::fs::File;
-use std::io::{BufWriter, ErrorKind, Write};
+use std::io::{ErrorKind, Write};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::SystemTime;
 use std::{fmt, fs, io, thread};
@@ -145,7 +145,7 @@ macro_rules! log {
 		$crate::Logger::apply_to_current(|logger| {
 			logger.log($crate::Message {
 				severity: $crate::Severity::$severity,
-				message: ::core::format_args!($format, $($arg),*),
+				message: Some(::core::format_args!($format, $($arg),*)),
 				error: Some(&$error),
 				module: Some(::core::module_path!()),
 				line: Some(::core::line!()),
@@ -156,7 +156,7 @@ macro_rules! log {
 		$crate::Logger::apply_to_current(|logger| {
 			logger.log($crate::Message {
 				severity: $crate::Severity::$severity,
-				message: ::core::format_args!($format, $($arg),*),
+				message: Some(::core::format_args!($format, $($arg),*)),
 				error: None,
 				module: Some(::core::module_path!()),
 				line: Some(::core::line!()),
@@ -167,7 +167,7 @@ macro_rules! log {
 		$crate::Logger::apply_to_current(|logger| {
 			logger.log($crate::Message {
 				severity: $crate::Severity::$severity,
-				message: ::core::format_args!($format),
+				message: Some(::core::format_args!($format)),
 				error: Some(&$error),
 				module: Some(::core::module_path!()),
 				line: Some(::core::line!()),
@@ -178,7 +178,7 @@ macro_rules! log {
 		$crate::Logger::apply_to_current(|logger| {
 			logger.log($crate::Message {
 				severity: $crate::Severity::$severity,
-				message: ::core::format_args!($format),
+				message: Some(::core::format_args!($format)),
 				error: None,
 				module: Some(::core::module_path!()),
 				line: Some(::core::line!()),
@@ -189,7 +189,7 @@ macro_rules! log {
 		$crate::Logger::apply_to_current(|logger| {
 			logger.log($crate::Message {
 				severity: $crate::Severity::$severity,
-				message: ::core::format_args!(""),
+				message: None,
 				error: Some(&$error),
 				module: Some(::core::module_path!()),
 				line: Some(::core::line!()),
@@ -203,7 +203,7 @@ macro_rules! log_to {
     ($logger:expr, $severity:ident, $error:expr, $format:literal, $($arg:expr),*) => {{
 		$logger.log($crate::Message {
 			severity: $crate::Severity::$severity,
-			message: ::core::format_args!($format, $($arg),*),
+			message: Some(::core::format_args!($format, $($arg),*)),
 			error: Some(&$error),
 			module: Some(::core::module_path!()),
 			line: Some(::core::line!()),
@@ -212,7 +212,7 @@ macro_rules! log_to {
 	($logger:expr, $severity:ident, $format:literal, $($arg:expr),*) => {{
 		$logger.log($crate::Message {
 			severity: $crate::Severity::$severity,
-			message: ::core::format_args!($format, $($arg),*),
+			message: Some(::core::format_args!($format, $($arg),*)),
 			error: None,
 			module: Some(::core::module_path!()),
 			line: Some(::core::line!()),
@@ -221,7 +221,7 @@ macro_rules! log_to {
     ($logger:expr, $severity:ident, $error:expr, $format:literal) => {{
 		$logger.log($crate::Message {
 			severity: $crate::Severity::$severity,
-			message: ::core::format_args!($format),
+			message: Some(::core::format_args!($format)),
 			error: Some(&$error),
 			module: Some(::core::module_path!()),
 			line: Some(::core::line!()),
@@ -230,7 +230,7 @@ macro_rules! log_to {
 	($logger:expr, $severity:ident, $format:literal) => {{
 		$logger.log($crate::Message {
 			severity: $crate::Severity::$severity,
-			message: ::core::format_args!($format),
+			message: Some(::core::format_args!($format)),
 			error: None,
 			module: Some(::core::module_path!()),
 			line: Some(::core::line!()),
@@ -239,7 +239,7 @@ macro_rules! log_to {
 	($logger:expr, $severity:ident, $error:expr) => {{
 		$logger.log($crate::Message {
 			severity: $crate::Severity::$severity,
-			message: ::core::format_args!(""),
+			message: None,
 			error: Some(&$error),
 			module: Some(::core::module_path!()),
 			line: Some(::core::line!()),
@@ -338,7 +338,7 @@ impl<T: Write> Write for NewlineReplacer<'_, T> {
 #[derive(Copy, Clone)]
 pub struct Message<'a> {
 	pub severity: Severity,
-	pub message: fmt::Arguments<'a>,
+	pub message: Option<fmt::Arguments<'a>>,
 	pub error: Option<&'a dyn Error>,
 	pub module: Option<&'a str>,
 	pub line: Option<u32>
@@ -707,15 +707,20 @@ impl Logger {
 	}
 
 	fn do_write<T: Write>(&self, device: &mut T, message: Message, pretty: bool) -> io::Result<()> {
+		if message.message.is_none() && message.error.is_none() {
+			return Ok(());
+		}
+
 		let temp = PrefixTempData::new(self);
 		if pretty {
 			write!(device, "{}", Color::White.normal().paint(""))?; // Reset color
 		}
-		self.write_complete_prefix(device, message, pretty, &temp)?;
 
-		NewlineReplacer(&mut *device, NEWLINE_MARKER).write_fmt(message.message)?;
-
-		writeln!(device)?;
+		if let Some(the_msg) = message.message {
+			self.write_complete_prefix(device, message, pretty, &temp)?;
+			NewlineReplacer(&mut *device, NEWLINE_MARKER).write_fmt(the_msg)?;
+			writeln!(device)?;
+		}
 
 		// Write errors
 		if let Some(error) = message.error {
@@ -915,7 +920,7 @@ impl log::Log for Logger {
 
 		self.is_enabled(Target::File, &Message {
 			severity,
-			message: format_args!(""),
+			message: None,
 			error: None,
 			module: None,
 			line: None
@@ -927,7 +932,7 @@ impl log::Log for Logger {
 		let severity = level_to_severity(record.level());
 		self.log(Message {
 			severity,
-			message: *record.args(),
+			message: Some(*record.args()),
 			error: None,
 			module: record.module_path(),
 			line: record.line(),
